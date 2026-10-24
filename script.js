@@ -2,7 +2,9 @@
 (() => {
   "use strict";
 
-  // Change this to your own 4-digit PIN.
+  const SUPABASE_URL = "https://hdhoynjhhthxgskeouxh.supabase.co";
+  const SUPABASE_KEY = "sb_publishable_Vdi8ZfQSGwDDgyO7TSUCfA_695WKFAI";
+  const IMAGE_BUCKET = "customer-images";
   const ADD_CUSTOMER_PIN = "4826";
   const STORAGE_KEY = "stitchnote_customers_v1";
 
@@ -11,9 +13,16 @@
     "மு.க.வு", "மு.வு", "கிராஸ்", "பட்டி"
   ];
 
+  if (!window.supabase) {
+    alert("Supabase could not load. Check your internet connection.");
+    return;
+  }
+
+  const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
   const $ = (id) => document.getElementById(id);
 
   const els = {
+    app: document.querySelector(".app-shell"),
     search: $("searchInput"),
     clearSearch: $("clearSearchBtn"),
     list: $("customerList"),
@@ -40,74 +49,106 @@
     toast: $("toast")
   };
 
-  let customers = loadCustomers();
+  let customers = [];
   let activeCustomerId = null;
-  let selectedImageData = "";
+  let selectedImageFile = null;
   let toastTimeout = null;
+  let currentUser = null;
+  let busy = false;
 
-  function loadCustomers() {
-    try {
-      const data = JSON.parse(
-        localStorage.getItem(STORAGE_KEY) || "[]"
-      );
-      return Array.isArray(data) ? data : [];
-    } catch (error) {
-      return [];
+  // Add login and account controls without replacing your existing HTML.
+  const loginStyle = document.createElement("style");
+  loginStyle.textContent = `
+    .sn-login-wrap {
+      min-height: 100vh; display: grid; place-items: center;
+      padding: 24px; background: #f7f5f0;
+      font-family: "DM Sans", system-ui, sans-serif;
     }
-  }
+    .sn-login-card {
+      width: min(420px, 100%); padding: 28px;
+      border-radius: 18px; background: white;
+      border: 1px solid #e8e8e1;
+      box-shadow: 0 18px 55px rgba(28,42,32,.10);
+    }
+    .sn-login-card h1 { margin: 0 0 8px; color: #2e6652; }
+    .sn-login-card p { color: #737b75; font-size: 14px; line-height: 1.6; }
+    .sn-login-card label { display:block; font-size:13px; font-weight:700; margin-top:15px; }
+    .sn-login-card input {
+      display:block; width:100%; box-sizing:border-box; margin-top:7px;
+      padding:12px; border:1px solid #dfe3dc; border-radius:9px;
+      font:inherit;
+    }
+    .sn-login-card button {
+      width:100%; margin-top:18px; min-height:44px; border:0;
+      border-radius:9px; background:#2e6652; color:white;
+      font-weight:700; cursor:pointer;
+    }
+    .sn-login-error { color:#b23b36 !important; overflow-wrap:anywhere; }
+    .sn-account-bar {
+      display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+      margin:0 0 18px; font-size:12px; color:#737b75;
+    }
+    .sn-account-bar button {
+      margin-left:auto; border:1px solid #e8e8e1; border-radius:8px;
+      background:white; padding:8px 12px; cursor:pointer;
+    }
+    .sn-status { font-size:12px; color:#2e6652; margin-top:10px; }
+  `;
+  document.head.appendChild(loginStyle);
 
-  function saveCustomers() {
-    try {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify(customers)
-      );
-      return true;
-    } catch (error) {
-      showToast("Storage is full. Try a smaller image.");
-      return false;
+  const loginWrap = document.createElement("main");
+  loginWrap.className = "sn-login-wrap";
+  loginWrap.innerHTML = `
+    <section class="sn-login-card">
+      <h1>StitchNote</h1>
+      <p>Sign in to view and update your tailoring customer records across devices.</p>
+      <form id="snLoginForm">
+        <label for="snEmail">Email address</label>
+        <input id="snEmail" type="email" autocomplete="username" required>
+        <label for="snPassword">Password</label>
+        <input id="snPassword" type="password" autocomplete="current-password" required>
+        <button id="snLoginButton" type="submit">Sign in</button>
+        <p id="snLoginError" class="sn-login-error" role="alert"></p>
+        <p id="snLoginStatus" class="sn-status" role="status"></p>
+      </form>
+    </section>
+  `;
+  document.body.insertBefore(loginWrap, document.body.firstChild);
+
+  const accountBar = document.createElement("div");
+  accountBar.className = "sn-account-bar";
+  accountBar.innerHTML = `
+    <span id="snAccountEmail"></span>
+    <button id="snSignOut" type="button">Sign out</button>
+  `;
+  const topbar = document.querySelector(".topbar");
+  if (topbar) topbar.insertAdjacentElement("afterend", accountBar);
+
+  function showToast(message) {
+    if (!els.toast) {
+      alert(message);
+      return;
     }
+    els.toast.textContent = message;
+    els.toast.classList.add("show");
+    clearTimeout(toastTimeout);
+    toastTimeout = setTimeout(() => els.toast.classList.remove("show"), 3000);
   }
 
   function escapeHTML(value) {
-    return String(value ?? "").replace(/[&<>"']/g, (char) => ({
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;"
+    return String(value ?? "").replace(/[&<>"']/g, char => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;",
+      '"': "&quot;", "'": "&#39;"
     }[char]));
-  }
-
-  function makeId() {
-    return (window.crypto && crypto.randomUUID)
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   }
 
   function formatDate(value) {
     if (!value) return "";
-
     const date = new Date(value);
-
     if (Number.isNaN(date.getTime())) return "";
-
     return date.toLocaleDateString(undefined, {
-      day: "numeric",
-      month: "short",
-      year: "numeric"
+      day: "numeric", month: "short", year: "numeric"
     });
-  }
-
-  function showToast(message) {
-    els.toast.textContent = message;
-    els.toast.classList.add("show");
-
-    clearTimeout(toastTimeout);
-
-    toastTimeout = setTimeout(() => {
-      els.toast.classList.remove("show");
-    }, 2600);
   }
 
   function openModal(id) {
@@ -117,212 +158,156 @@
 
   function closeModal(id) {
     $(id).classList.add("hidden");
-
-    if (
-      els.addModal.classList.contains("hidden") &&
-      els.detailsModal.classList.contains("hidden")
-    ) {
+    if (els.addModal.classList.contains("hidden") &&
+        els.detailsModal.classList.contains("hidden")) {
       document.body.style.overflow = "";
     }
   }
 
+  function showFormError(message) {
+    els.formError.textContent = message;
+    els.formError.classList.remove("hidden");
+  }
+
+  function clearFormError() {
+    els.formError.textContent = "";
+    els.formError.classList.add("hidden");
+  }
+
   function renderFixedMeasurements() {
-    els.fixedMeasurements.innerHTML =
-      FIXED_MEASUREMENTS.map((label, index) => `
-        <label class="field measurement-field">
-          <span>${escapeHTML(label)}</span>
-          <input
-            class="text-input fixed-measurement"
-            data-label="${escapeHTML(label)}"
-            type="text"
-            maxlength="80"
-            placeholder="அளவு ${index + 1}"
-            autocomplete="off"
-          >
-        </label>
-      `).join("");
+    els.fixedMeasurements.innerHTML = FIXED_MEASUREMENTS.map((label, index) => `
+      <label class="field measurement-field">
+        <span>${escapeHTML(label)}</span>
+        <input class="text-input fixed-measurement"
+          data-label="${escapeHTML(label)}" type="text" maxlength="80"
+          placeholder="அளவு ${index + 1}" autocomplete="off">
+      </label>
+    `).join("");
   }
 
   function addCustomMeasurementField(label = "", value = "") {
     const row = document.createElement("div");
     row.className = "custom-row";
-
     row.innerHTML = `
-      <input
-        class="text-input custom-label"
-        type="text"
-        maxlength="60"
-        placeholder="Field name"
-        aria-label="Additional measurement name"
-      >
-
-      <input
-        class="text-input custom-value"
-        type="text"
-        maxlength="80"
-        placeholder="Measurement"
-        aria-label="Additional measurement value"
-      >
-
-      <button
-        class="remove-field-btn"
-        type="button"
-        aria-label="Remove field"
-      >×</button>
+      <input class="text-input custom-label" type="text" maxlength="60"
+        placeholder="Field name" aria-label="Additional measurement name">
+      <input class="text-input custom-value" type="text" maxlength="80"
+        placeholder="Measurement" aria-label="Additional measurement value">
+      <button class="remove-field-btn" type="button" aria-label="Remove field">×</button>
     `;
-
     row.querySelector(".custom-label").value = label;
     row.querySelector(".custom-value").value = value;
-
-    row.querySelector(".remove-field-btn").addEventListener(
-      "click",
-      () => row.remove()
-    );
-
+    row.querySelector(".remove-field-btn").addEventListener("click", () => row.remove());
     els.customMeasurements.appendChild(row);
   }
 
   function collectMeasurements() {
     const measurements = {};
 
-    els.fixedMeasurements
-      .querySelectorAll(".fixed-measurement")
-      .forEach((input) => {
-        const value = input.value.trim();
+    els.fixedMeasurements.querySelectorAll(".fixed-measurement").forEach(input => {
+      const value = input.value.trim();
+      if (value) measurements[input.dataset.label] = value;
+    });
 
-        if (value) {
-          measurements[input.dataset.label] = value;
-        }
-      });
+    const seen = new Set(Object.keys(measurements).map(x => x.toLocaleLowerCase()));
 
-    const seenLabels = new Set(
-      Object.keys(measurements).map((label) =>
-        label.toLocaleLowerCase()
-      )
-    );
-
-    const rows = [
-      ...els.customMeasurements.querySelectorAll(".custom-row")
-    ];
-
-    for (const row of rows) {
+    for (const row of els.customMeasurements.querySelectorAll(".custom-row")) {
       const label = row.querySelector(".custom-label").value.trim();
       const value = row.querySelector(".custom-value").value.trim();
-
       if (!label && !value) continue;
-
       if (!label || !value) {
-        throw new Error(
-          "Enter both the additional field name and its measurement, or remove the empty field."
-        );
+        throw new Error("Enter both the additional field name and measurement, or remove the empty field.");
       }
-
-      if (seenLabels.has(label.toLocaleLowerCase())) {
-        throw new Error(
-          `The measurement field "${label}" is repeated.`
-        );
+      if (seen.has(label.toLocaleLowerCase())) {
+        throw new Error(`The measurement field "${label}" is repeated.`);
       }
-
-      seenLabels.add(label.toLocaleLowerCase());
+      seen.add(label.toLocaleLowerCase());
       measurements[label] = value;
     }
-
     return measurements;
   }
 
   function renderCustomers() {
     const query = els.search.value.trim().toLocaleLowerCase();
-
     const filtered = customers
-      .filter((customer) =>
-        String(customer.name || "")
-          .toLocaleLowerCase()
-          .includes(query) ||
-        String(customer.phone || "")
-          .toLocaleLowerCase()
-          .includes(query)
-      )
-      .sort(
-        (a, b) =>
-          new Date(b.createdAt || 0) -
-          new Date(a.createdAt || 0)
-      );
+      .filter(c => String(c.name || "").toLocaleLowerCase().includes(query) ||
+                   String(c.phone || "").toLocaleLowerCase().includes(query))
+      .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
 
-    els.count.textContent =
-      `${filtered.length} ${filtered.length === 1 ? "record" : "records"}`;
+    els.count.textContent = `${filtered.length} ${filtered.length === 1 ? "record" : "records"}`;
+    els.heading.textContent = query ? "Search results" : "Customers";
+    els.clearSearch.classList.toggle("hidden", !els.search.value);
 
-    els.heading.textContent = query
-      ? "Search results"
-      : "Customers";
-
-    els.clearSearch.classList.toggle(
-      "hidden",
-      !els.search.value
-    );
-
-    els.list.innerHTML = filtered.map((customer) => {
-      const initial =
-        (customer.name || "?").trim().charAt(0) || "?";
-
+    els.list.innerHTML = filtered.map(customer => {
+      const initial = (customer.name || "?").trim().charAt(0) || "?";
       return `
-        <button
-          class="customer-row"
-          type="button"
-          data-customer-id="${escapeHTML(customer.id)}"
-        >
+        <button class="customer-row" type="button"
+          data-customer-id="${escapeHTML(customer.id)}">
           <span class="avatar">${escapeHTML(initial)}</span>
-
           <span class="customer-main">
-            <span class="customer-name">
-              ${escapeHTML(customer.name || "Unnamed customer")}
-            </span>
-
-            <span class="customer-phone">
-              ${escapeHTML(customer.phone || "No phone number")}
-            </span>
+            <span class="customer-name">${escapeHTML(customer.name || "Unnamed customer")}</span>
+            <span class="customer-phone">${escapeHTML(customer.phone || "No phone number")}</span>
           </span>
-
           <span class="customer-side">
-            <span class="record-date">
-              ${escapeHTML(formatDate(customer.createdAt))}
-            </span>
-
+            <span class="record-date">${escapeHTML(formatDate(customer.createdAt))}</span>
             <span class="row-arrow" aria-hidden="true">›</span>
           </span>
-        </button>
-      `;
+        </button>`;
     }).join("");
 
-    const noMatches = filtered.length === 0;
-
-    els.empty.classList.toggle("show", noMatches);
-
-    if (noMatches && query) {
+    const none = filtered.length === 0;
+    els.empty.classList.toggle("show", none);
+    if (none && query) {
       els.emptyTitle.textContent = "No matching customers";
-      els.emptyText.textContent =
-        "Try another name or phone number, or add this customer as a new record.";
+      els.emptyText.textContent = "Try another name or phone number, or add a new record.";
       $("emptyAddBtn").textContent = "+ Add customer";
-    } else if (noMatches) {
+    } else if (none) {
       els.emptyTitle.textContent = "No customers yet";
-      els.emptyText.textContent =
-        "Add your first customer to save their measurements.";
+      els.emptyText.textContent = "Add your first customer to save their measurements.";
       $("emptyAddBtn").textContent = "+ Add first customer";
     }
+  }
+
+  async function fetchCustomers() {
+    const { data, error } = await db.from("customers")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    customers = await Promise.all((data || []).map(async row => {
+      let image = "";
+      if (row.image_url) {
+        const { data: signed, error: imageError } = await db.storage
+          .from(IMAGE_BUCKET)
+          .createSignedUrl(row.image_url, 3600);
+        if (!imageError && signed) image = signed.signedUrl;
+      }
+
+      return {
+        id: row.id,
+        name: row.name,
+        phone: row.phone || "",
+        measurements: row.measurements || {},
+        notes: row.notes || "",
+        image,
+        imagePath: row.image_url || "",
+        createdAt: row.created_at
+      };
+    }));
+
+    renderCustomers();
   }
 
   function resetCustomerForm() {
     els.customerForm.reset();
     els.pinForm.reset();
-
     els.pinError.classList.add("hidden");
-    els.formError.classList.add("hidden");
-
+    clearFormError();
     els.customerForm.classList.add("hidden");
     els.pinForm.classList.remove("hidden");
-
     els.customMeasurements.innerHTML = "";
-
-    selectedImageData = "";
+    selectedImageFile = null;
     els.imagePreview.src = "";
     els.imagePreview.classList.add("hidden");
     els.imageInput.value = "";
@@ -331,205 +316,137 @@
   function startAddCustomer() {
     resetCustomerForm();
     openModal("addModal");
-
     setTimeout(() => els.pinInput.focus(), 40);
   }
 
-  function renderDetails(customer) {
-    els.detailsTitle.textContent =
-      customer.name || "Customer details";
+  async function uploadImage(file) {
+    if (!file) return null;
+    if (!file.type.startsWith("image/")) throw new Error("Please choose an image file.");
+    if (file.size > 5 * 1024 * 1024) throw new Error("Please choose an image smaller than 5 MB.");
 
-    const measurementEntries = Object.entries(
-      customer.measurements || {}
-    );
+    const path = `${currentUser.id}/${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
+    const { error } = await db.storage.from(IMAGE_BUCKET).upload(path, file, {
+      upsert: false,
+      contentType: file.type
+    });
+    if (error) throw error;
+    return path;
+  }
 
-    const measurementMarkup = measurementEntries.length
-      ? measurementEntries.map(([label, value]) => `
+  async function renderDetails(customer) {
+    els.detailsTitle.textContent = customer.name || "Customer details";
+    const entries = Object.entries(customer.measurements || {});
+    const measurementMarkup = entries.length
+      ? entries.map(([label, value]) => `
           <div class="measurement-item">
-            <span class="measurement-label">
-              ${escapeHTML(label)}
-            </span>
-
-            <span class="measurement-value">
-              ${escapeHTML(value)}
-            </span>
-          </div>
-        `).join("")
+            <span class="measurement-label">${escapeHTML(label)}</span>
+            <span class="measurement-value">${escapeHTML(value)}</span>
+          </div>`).join("")
       : `<p class="helper-text">No measurements have been entered for this customer.</p>`;
 
-    const imageMarkup = customer.image
-      ? `
-          <h3 class="detail-section-title">Diagram / image</h3>
-          <img
-            class="detail-image"
-            src="${customer.image}"
-            alt="Measurement diagram"
-          >
-        `
-      : "";
+    let imageMarkup = "";
+    if (customer.image) {
+      imageMarkup = `
+        <h3 class="detail-section-title">Diagram / image</h3>
+        <img class="detail-image" src="${escapeHTML(customer.image)}" alt="Measurement diagram">`;
+    }
 
     const notesMarkup = customer.notes
-      ? `
-          <h3 class="detail-section-title">Notes</h3>
-          <p class="detail-notes">
-            ${escapeHTML(customer.notes)}
-          </p>
-        `
+      ? `<h3 class="detail-section-title">Notes</h3><p class="detail-notes">${escapeHTML(customer.notes)}</p>`
       : "";
 
     els.customerDetails.innerHTML = `
-      <p class="details-contact">
-        ${escapeHTML(customer.phone || "No phone number")}
-        · Added ${escapeHTML(formatDate(customer.createdAt))}
-      </p>
-
+      <p class="details-contact">${escapeHTML(customer.phone || "No phone number")}
+      · Added ${escapeHTML(formatDate(customer.createdAt))}</p>
       <h3 class="detail-section-title">Measurements</h3>
-
-      <div class="measurement-grid">
-        ${measurementMarkup}
-      </div>
-
-      ${imageMarkup}
-      ${notesMarkup}
-    `;
+      <div class="measurement-grid">${measurementMarkup}</div>
+      ${imageMarkup}${notesMarkup}`;
 
     activeCustomerId = customer.id;
     openModal("detailsModal");
   }
 
-  // Open the add-customer form.
-  $("addCustomerBtn").addEventListener(
-    "click",
-    startAddCustomer
-  );
+  $("addCustomerBtn").addEventListener("click", startAddCustomer);
+  $("emptyAddBtn").addEventListener("click", startAddCustomer);
 
-  $("emptyAddBtn").addEventListener(
-    "click",
-    startAddCustomer
-  );
-
-  // Clear search.
   els.clearSearch.addEventListener("click", () => {
     els.search.value = "";
     renderCustomers();
     els.search.focus();
   });
-
-  // Search by customer name or phone.
   els.search.addEventListener("input", renderCustomers);
 
-  // Open customer details.
-  els.list.addEventListener("click", (event) => {
+  els.list.addEventListener("click", event => {
     const button = event.target.closest("[data-customer-id]");
-
     if (!button) return;
-
-    const customer = customers.find(
-      (item) => item.id === button.dataset.customerId
-    );
-
+    const customer = customers.find(c => c.id === button.dataset.customerId);
     if (customer) renderDetails(customer);
   });
 
-  // Close modals.
-  document.querySelectorAll("[data-close]").forEach((button) => {
-    button.addEventListener("click", () => {
-      closeModal(button.dataset.close);
+  document.querySelectorAll("[data-close]").forEach(button => {
+    button.addEventListener("click", () => closeModal(button.dataset.close));
+  });
+
+  document.querySelectorAll(".modal-backdrop").forEach(backdrop => {
+    backdrop.addEventListener("click", event => {
+      if (event.target === backdrop) closeModal(backdrop.id);
     });
   });
 
-  document.querySelectorAll(".modal-backdrop").forEach((backdrop) => {
-    backdrop.addEventListener("click", (event) => {
-      if (event.target === backdrop) {
-        closeModal(backdrop.id);
-      }
-    });
-  });
-
-  document.addEventListener("keydown", (event) => {
+  document.addEventListener("keydown", event => {
     if (event.key === "Escape") {
       closeModal("addModal");
       closeModal("detailsModal");
     }
   });
 
-  // Verify PIN before allowing a customer to be added.
-  els.pinForm.addEventListener("submit", (event) => {
+  els.pinForm.addEventListener("submit", event => {
     event.preventDefault();
-
     if (els.pinInput.value !== ADD_CUSTOMER_PIN) {
       els.pinError.classList.remove("hidden");
       els.pinInput.select();
       return;
     }
-
     els.pinError.classList.add("hidden");
     els.pinForm.classList.add("hidden");
     els.customerForm.classList.remove("hidden");
-
     setTimeout(() => $("customerName").focus(), 40);
   });
 
-  // Add an extra measurement field.
-  els.addCustomField.addEventListener("click", () => {
-    addCustomMeasurementField();
-  });
+  els.addCustomField.addEventListener("click", () => addCustomMeasurementField());
 
-  // Preview the selected measurement image.
   els.imageInput.addEventListener("change", () => {
-    const file =
-      els.imageInput.files && els.imageInput.files[0];
-
-    selectedImageData = "";
+    const file = els.imageInput.files?.[0] || null;
+    selectedImageFile = file;
     els.imagePreview.classList.add("hidden");
+    els.imagePreview.removeAttribute("src");
+    clearFormError();
 
     if (!file) return;
-
     if (!file.type.startsWith("image/")) {
       showFormError("Please choose an image file.");
       els.imageInput.value = "";
+      selectedImageFile = null;
       return;
     }
-
-    if (file.size > 1.5 * 1024 * 1024) {
-      showFormError(
-        "Please choose an image smaller than 1.5 MB so it can be saved in this browser."
-      );
+    if (file.size > 5 * 1024 * 1024) {
+      showFormError("Please choose an image smaller than 5 MB.");
       els.imageInput.value = "";
+      selectedImageFile = null;
       return;
     }
 
-    const reader = new FileReader();
-
-    reader.onload = () => {
-      selectedImageData = String(reader.result || "");
-      els.imagePreview.src = selectedImageData;
-      els.imagePreview.classList.remove("hidden");
-    };
-
-    reader.onerror = () => {
-      showFormError(
-        "Could not read that image. Please choose it again."
-      );
-    };
-
-    reader.readAsDataURL(file);
+    els.imagePreview.src = URL.createObjectURL(file);
+    els.imagePreview.classList.remove("hidden");
   });
 
-  function showFormError(message) {
-    els.formError.textContent = message;
-    els.formError.classList.remove("hidden");
-  }
-
-  // Save a new customer.
-  els.customerForm.addEventListener("submit", (event) => {
+  els.customerForm.addEventListener("submit", async event => {
     event.preventDefault();
-
-    els.formError.classList.add("hidden");
+    if (busy) return;
+    clearFormError();
 
     const name = $("customerName").value.trim();
     const phone = $("customerPhone").value.trim();
-
     if (!name) {
       showFormError("Please enter the customer's name.");
       $("customerName").focus();
@@ -537,7 +454,6 @@
     }
 
     let measurements;
-
     try {
       measurements = collectMeasurements();
     } catch (error) {
@@ -545,86 +461,217 @@
       return;
     }
 
-    const customer = {
-      id: makeId(),
-      name,
-      phone,
-      measurements,
-      notes: $("customerNotes").value.trim(),
-      image: selectedImageData,
-      createdAt: new Date().toISOString()
-    };
-
-    customers.unshift(customer);
-
-    if (!saveCustomers()) {
-      customers = customers.filter(
-        (item) => item.id !== customer.id
-      );
-      return;
+    busy = true;
+    const submitButton = els.customerForm.querySelector('[type="submit"]');
+    if (submitButton) {
+      submitButton.disabled = true;
+      submitButton.textContent = "Saving...";
     }
 
-    closeModal("addModal");
-    els.search.value = "";
-    renderCustomers();
+    let uploadedPath = null;
+    try {
+      if (!currentUser) throw new Error("Please sign in again.");
 
-    showToast("Customer saved successfully.");
+      if (selectedImageFile) uploadedPath = await uploadImage(selectedImageFile);
+
+      const payload = {
+        name,
+        phone,
+        measurements,
+        notes: $("customerNotes").value.trim(),
+        image_url: uploadedPath
+      };
+
+      const { error } = await db.from("customers").insert(payload);
+      if (error) throw error;
+
+      closeModal("addModal");
+      els.search.value = "";
+      await fetchCustomers();
+      showToast("Customer saved to the cloud.");
+    } catch (error) {
+      if (uploadedPath) {
+        await db.storage.from(IMAGE_BUCKET).remove([uploadedPath]);
+      }
+      showFormError(error.message || "Could not save the customer. Please try again.");
+    } finally {
+      busy = false;
+      if (submitButton) {
+        submitButton.disabled = false;
+        submitButton.textContent = "Save customer";
+      }
+    }
   });
 
-  // DELETE CUSTOMER: requires the same PIN used for adding.
-  els.deleteButton.addEventListener("click", () => {
-    if (!activeCustomerId) return;
+  els.deleteButton.addEventListener("click", async () => {
+    if (!activeCustomerId || busy) return;
 
-    const customer = customers.find(
-      (item) => item.id === activeCustomerId
-    );
-
+    const customer = customers.find(c => c.id === activeCustomerId);
     if (!customer) return;
 
-    const enteredPin = window.prompt(
-      "Enter the 4-digit PIN to delete this customer record:"
-    );
-
-    // Stop if the user presses Cancel.
-    if (enteredPin === null) return;
-
-    // Reject an incorrect PIN.
-    if (enteredPin !== ADD_CUSTOMER_PIN) {
-      window.alert(
-        "Incorrect PIN. The customer record was not deleted."
-      );
+    const pin = window.prompt("Enter the 4-digit PIN to delete this customer record:");
+    if (pin === null) return;
+    if (pin !== ADD_CUSTOMER_PIN) {
+      window.alert("Incorrect PIN. The record was not deleted.");
       return;
     }
+    if (!window.confirm(`Delete the record for ${customer.name}? This cannot be undone.`)) return;
 
-    // Confirm before permanently deleting the record.
-    if (
-      !window.confirm(
-        `Delete the record for ${customer.name}? This cannot be undone.`
-      )
-    ) {
-      return;
+    busy = true;
+    try {
+      const { error } = await db.from("customers")
+        .delete()
+        .eq("id", activeCustomerId);
+      if (error) throw error;
+
+      if (customer.imagePath) {
+        const { error: storageError } = await db.storage
+          .from(IMAGE_BUCKET).remove([customer.imagePath]);
+        if (storageError) console.warn("Image cleanup failed:", storageError.message);
+      }
+
+      activeCustomerId = null;
+      closeModal("detailsModal");
+      await fetchCustomers();
+      showToast("Customer record deleted.");
+    } catch (error) {
+      window.alert(error.message || "Could not delete the record.");
+    } finally {
+      busy = false;
     }
-
-    const previousCustomers = customers;
-
-    customers = customers.filter(
-      (item) => item.id !== activeCustomerId
-    );
-
-    // Restore records if saving fails.
-    if (!saveCustomers()) {
-      customers = previousCustomers;
-      return;
-    }
-
-    activeCustomerId = null;
-    closeModal("detailsModal");
-    renderCustomers();
-
-    showToast("Customer record deleted.");
   });
 
-  // Start the application.
-  renderFixedMeasurements();
-  renderCustomers();
+  $("snLoginForm").addEventListener("submit", async event => {
+    event.preventDefault();
+    const errorBox = $("snLoginError");
+    const status = $("snLoginStatus");
+    const button = $("snLoginButton");
+    errorBox.textContent = "";
+    status.textContent = "Signing in...";
+    button.disabled = true;
+
+    try {
+      const email = $("snEmail").value.trim();
+      const password = $("snPassword").value;
+      const { data, error } = await db.auth.signInWithPassword({ email, password });
+      if (error) throw error;
+      await activateSession(data.user);
+    } catch (error) {
+      errorBox.textContent = error.message || "Sign-in failed.";
+      status.textContent = "";
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  $("snSignOut").addEventListener("click", async () => {
+    const { error } = await db.auth.signOut();
+    if (error) {
+      showToast(error.message);
+      return;
+    }
+    currentUser = null;
+    customers = [];
+    els.app.classList.add("hidden");
+    accountBar.classList.add("hidden");
+    loginWrap.classList.remove("hidden");
+  });
+
+  async function activateSession(user) {
+    currentUser = user;
+    $("snAccountEmail").textContent = user.email || "Signed in";
+    loginWrap.classList.add("hidden");
+    accountBar.classList.remove("hidden");
+    els.app.classList.remove("hidden");
+    try {
+      await fetchCustomers();
+    } catch (error) {
+      showToast("Could not load cloud records: " + (error.message || "Please try again."));
+      console.error(error);
+    }
+  }
+
+  // Offer a one-time import of records previously saved in this browser.
+  async function offerLocalImport() {
+    let oldRecords = [];
+    try {
+      oldRecords = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+    } catch (_) {}
+    if (!Array.isArray(oldRecords) || oldRecords.length === 0) return;
+
+    const key = `stitchnote_imported_${currentUser.id}`;
+    if (localStorage.getItem(key)) return;
+
+    const shouldImport = window.confirm(
+      `Found ${oldRecords.length} old record(s) saved only in this browser. Import them into your cloud account?`
+    );
+    if (!shouldImport) return;
+
+    let imported = 0;
+    for (const old of oldRecords) {
+      let imagePath = null;
+      try {
+        // Older images were saved as data URLs. Convert them back to files for cloud storage.
+        if (old.image && old.image.startsWith("data:image/")) {
+          const response = await fetch(old.image);
+          const blob = await response.blob();
+          const file = new File([blob], "imported-image", { type: blob.type });
+          imagePath = await uploadImage(file);
+        }
+
+        const { error } = await db.from("customers").insert({
+          name: old.name || "Unnamed customer",
+          phone: old.phone || "",
+          measurements: old.measurements || {},
+          notes: old.notes || "",
+          image_url: imagePath,
+          created_at: old.createdAt || new Date().toISOString()
+        });
+        if (error) throw error;
+        imported++;
+      } catch (error) {
+        console.error("Could not import one record:", error);
+      }
+    }
+
+    localStorage.setItem(key, "yes");
+    await fetchCustomers();
+    showToast(`Imported ${imported} of ${oldRecords.length} record(s).`);
+  }
+
+  async function start() {
+    renderFixedMeasurements();
+    els.app.classList.add("hidden");
+    accountBar.classList.add("hidden");
+    loginWrap.classList.remove("hidden");
+
+    const { data, error } = await db.auth.getSession();
+    if (error) {
+      $("snLoginError").textContent = error.message;
+      return;
+    }
+
+    if (data.session?.user) {
+      await activateSession(data.session.user);
+      await offerLocalImport();
+    }
+
+    db.auth.onAuthStateChange((event, session) => {
+      if (event === "SIGNED_IN" && session?.user) {
+        // Avoid duplicate activation when the sign-in handler already did it.
+        if (!currentUser || currentUser.id !== session.user.id) {
+          activateSession(session.user);
+        }
+      }
+      if (event === "SIGNED_OUT") {
+        currentUser = null;
+        customers = [];
+        els.app.classList.add("hidden");
+        accountBar.classList.add("hidden");
+        loginWrap.classList.remove("hidden");
+      }
+    });
+  }
+
+  start();
 })();
